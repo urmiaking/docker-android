@@ -2,13 +2,13 @@ import logging
 import os
 import subprocess
 import time
+import shutil
 
 from enum import Enum
 
 from src.device import Device, DeviceType
 from src.helper import convert_str_to_bool, get_env_value_or_raise, symlink_force
 from src.constants import ENV, UTF8
-
 
 class Emulator(Device):
     DEVICE = (
@@ -69,6 +69,12 @@ class Emulator(Device):
                                                    "configs", "devices", "profiles")
         self.path_emulator_skins = os.path.join(workdir, "docker-android", "mixins",
                                                 "configs", "devices", "skins")
+
+        self.path_user_data = os.path.join(workdir, "userdata")
+        self.init_user_data_file = os.path.join(workdir, "userdata", "userdata-qemu.img")
+        self.emulator_userdata_path = os.path.join(workdir, "emulator")
+        self.userdata_filenames = ["userdata.img", "userdata-qemu.img", "userdata-qemu.img.qcow2", "cache.img"]
+
         self.file_name = self.device.replace(" ", "_").lower()
         self.no_skin = convert_str_to_bool(os.getenv(ENV.EMULATOR_NO_SKIN))
         self.interval_after_booting = 15
@@ -99,6 +105,49 @@ class Emulator(Device):
         self.logger.info("Config file does not exist")
         return False
 
+    def restore(self) -> None:
+        for file_name in self.userdata_filenames:
+            source_path = os.path.join(self.path_user_data, file_name)
+            destination_path = os.path.join(self.emulator_userdata_path, file_name)
+
+            # Execute the sudo cp command to copy the file
+            subprocess.run(['cp', '-f', '-a', source_path, destination_path])
+
+            self.logger.info(f"Copied {file_name} to {self.emulator_userdata_path}")
+
+    def backup(self) -> None:
+        for file_name in self.userdata_filenames:
+            source_path = os.path.join(self.emulator_userdata_path, file_name)
+            destination_path = os.path.join(self.path_user_data, file_name)
+
+            # Execute the sudo cp command to copy the file
+            subprocess.run(['cp', '-f', '-a', source_path, destination_path])
+
+            self.logger.info(f"Copied {file_name} to {self.path_user_data}")
+
+    def move_userdata(self) -> None:
+        for file_name in self.userdata_filenames:
+            source_path = os.path.join(self.emulator_userdata_path, file_name)
+            destination_path = os.path.join(self.path_user_data, file_name)
+
+            copy_result = subprocess.run(['cp', '-f', '-a', source_path, destination_path], capture_output=True)
+
+            if copy_result.returncode == 0:
+                self.logger.info(f"Copied {file_name} to {self.path_user_data}")
+            else:
+                self.logger.info((f"Failed to Copy {file_name}: {copy_result.stderr.decode().strip()}"))
+            
+            file_path = os.path.join(self.emulator_userdata_path, file_name)
+            if os.path.exists(file_path):
+                delete_result = subprocess.run(['rm', '-f', file_path], capture_output=True)
+
+                if delete_result.returncode == 0:
+                    self.logger.info(f"Deleted {file_name}")
+                else:
+                    self.logger.info((f"Failed to Delete {file_name}: {delete_result.stderr.decode().strip()}"))
+            else:
+                self.logger.info(f"{file_name} does not exist in {self.emulator_userdata_path}")
+
     def _add_profile(self) -> None:
         if "samsung" in self.device.lower():
             path_device_profile_source = os.path.join(self.path_emulator_profiles,
@@ -120,6 +169,10 @@ class Emulator(Device):
         super().create()
         first_run = not self.is_initialized()
         if first_run:
+            if not os.path.exists(self.path_user_data):
+                os.makedirs(self.path_user_data)
+            else:
+                subprocess.check_call(f"sudo chown 1300:1301 {self.path_user_data}", shell=True)
             self.logger.info(f"Creating the {self.device_type}...")
             self._add_profile()
             creation_cmd = "avdmanager create avd -f -n {n} -b {it}/{si} " \
@@ -131,6 +184,16 @@ class Emulator(Device):
             subprocess.check_call(creation_cmd, shell=True)
             self._add_skin()
             self.logger.info(f"{self.device_type} is created!")
+
+            #backup_files_exist = all(os.path.isfile(os.path.join(self.path_user_data, file)) for file in self.userdata_filenames)
+
+            #if not backup_files_exist:
+                #self.logger.info("Moving userdata files to /userdata ...")
+                #self.move_userdata()
+
+            #if backup_files_exist:
+                #self.logger.info("Restoring user data files ...")
+                #self.restore()
 
     def change_permission(self) -> None:
         kvm_path = "/dev/kvm"
@@ -148,9 +211,15 @@ class Emulator(Device):
 
         basic_cmd = "emulator @{n}".format(n=self.name)
         basic_args = "-gpu swiftshader_indirect -accel on -writable-system -verbose"
-        wipe_arg = "-wipe-data" if not self.is_initialized() else ""
+        wipe_arg = "" #"-wipe-data" if not self.is_initialized() else ""
+        data_arg = ""
+        
+        backup_files_exist = any(os.path.isfile(os.path.join(self.path_user_data, file)) for file in self.userdata_filenames)
 
-        start_cmd = f"{basic_cmd} {basic_args} {wipe_arg} {self.additional_args}"
+        if backup_files_exist:
+            data_arg = f"-initdata {self.init_user_data_file}"
+
+        start_cmd = f"{basic_cmd} {basic_args} {wipe_arg} {data_arg} {self.additional_args}"
         self.logger.info(f"Command to run {self.device_type}: '{start_cmd}'")
         subprocess.Popen(start_cmd.split())
 
@@ -221,6 +290,14 @@ class Emulator(Device):
         self.logger.info(f"{self.device_type} is ready to use")
 
     def tear_down(self, *args) -> None:
+        self.logger.warning(f"Emulator is Shutting Down ...")
+        #shutdown_cmd = "adb -s emulator-5554 emu kill"
+        #self.check_adb_command(self.ReadinessCheck.BOOTED,
+        #                       shutdown_cmd, "OK", 5, self.interval_waiting)
+        
+        self.logger.warning(f"Backup in progress...! Copying {self.emulator_userdata_path} to {self.path_user_data}")
+        self.backup()
+
         self.logger.warning("Sigterm is detected! Nothing to do!")
 
     def __repr__(self) -> str:

@@ -1,0 +1,10 @@
+1- First run the emulator from docker-compose with the specified volume (From scratch)
+2- After the device booted, user may have make some modifcations to os for example installing an application
+3- When Container stops, we have to copy userdata-img userdata-qemu.img and userdata-qemu.img.qcow2 file to a directory in the host machine for that specific Container
+4- Also delete the hardware-qemu.ini.lock and multiinstance.lock "rm /home/androidusr/emulator/*.lock" in the volume.
+5- There should be a backup folder in the Container which mounted to user's backup folder in the host machine.
+6- In the second run, we should copy the backup folder into emulator folder.
+7- Run the emulator!
+
+* each time container stops, we should backup those 3 files from emulator folder into backup folder which is mounted to backup directory of host machine
+  considering this, We shall have no need to mount the entire emulator folder!
